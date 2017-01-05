@@ -2,7 +2,7 @@
 
 import unittest
 import tensorflow as tf
-from lr2 import *
+from lr2 import DataProvider
 
 flags = tf.app.flags
 FLAGS = flags.FLAGS

@@ -174,7 +174,9 @@ elif FLAGS.job_name == "worker":
                 if count % frequency == 0 or i+1 == batch_count:
                     elapsed_time = time.time() - start_time
                     start_time = time.time()
+                    global_step_val = sess.run(global_step)
                     print("Step: %d," % (step+1), 
+                                " Global Step: %2d," % (global_step_val), 
                                 " Epoch: %2d," % (epoch+1), 
                                 " Batch: %3d of %3d," % (i+1, batch_count), 
                                 " Cost: %.4f," % cost, 

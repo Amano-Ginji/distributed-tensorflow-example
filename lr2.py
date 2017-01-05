@@ -17,6 +17,7 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string('job_name', 'worker', 'job name')
 flags.DEFINE_integer('task_index', 0, 'task index')
+flags.DEFINE_integer('thread_num', 2, 'thread num')
 flags.DEFINE_float('learning_rate', 0.001, 'Initial learning rate.')
 flags.DEFINE_integer('num_epochs', 120, 'Number of epochs to run trainer.')
 flags.DEFINE_integer('batch_size', 500, 'Batch size. Must divide evenly into the dataset sizes.')
@@ -29,13 +30,13 @@ flags.DEFINE_string('test_file_list', 'hdfs://localhost:9000/user/yaowq/tensorfl
 
 
 def debug(msg):
-    tf.logging.debug('%s: %d, msg: %s' % (FLAGS.job_name, FLAGS.task_index, msg))
+    tf.logging.debug(' [%s:%d] %s' % (FLAGS.job_name, FLAGS.task_index, msg))
 
 def info(msg):
-    tf.logging.info('%s: %d, msg: %s' % (FLAGS.job_name, FLAGS.task_index, msg))
+    tf.logging.info(' [%s:%d] %s' % (FLAGS.job_name, FLAGS.task_index, msg))
 
 def error(msg):
-    tf.logging.error('%s: %d, msg: %s' % FLAGS.job_name, FLAGS.task_index, msg)
+    tf.logging.error('[%s:%d] %s' % FLAGS.job_name, FLAGS.task_index, msg)
 
 
 class Sample:
@@ -56,6 +57,23 @@ class Sample:
             self.indices.append(index)
             self.values.append(value)
 
+    @staticmethod
+    def format_samples_sparse(samples):
+        labels = []
+        fids = []
+        fvals = []
+        sp_indices = []
+        i = 0
+        size = len(samples)
+        for i in xrange(0, size):
+            sample = samples[i]
+            labels.append(sample.label)
+            fids += sample.indices
+            fvals += sample.values
+            for index in sample.indices:
+                sp_indices.append([i, index])
+        return np.reshape(labels, (size, 1)), fids, fvals, sp_indices, size
+        
 
 class LoadDataThread(threading.Thread):
     def __init__(self, tid, files):
@@ -70,6 +88,8 @@ class LoadDataThread(threading.Thread):
             lines_num = 0
             # TODO(yaowq): rewrite to batch generator mode
             for line in tf.gfile.GFile(file_name, mode='r'):
+                if line == None or len(line) < 2:
+                    continue
                 sample = Sample()
                 sample.parse_line_libsvm(line)
                 self.samples.append(sample)
@@ -88,7 +108,6 @@ class DataProvider:
         self.test_samples = []
         self.train_file_list = self.GetFileList(FLAGS.train_file_list, num_workers, task_index)
         self.test_file_list = self.GetFileList(FLAGS.test_file_list, num_workers, task_index)
-        tf.logging.info('')
 
         self.train_threads = self.InitThreads(self.train_file_list, len(self.train_file_list), self.thread_num)
         self.test_threads = self.InitThreads(self.test_file_list, len(self.test_file_list), self.thread_num)
@@ -122,20 +141,23 @@ class DataProvider:
     def LoadDataQueue(self):
         pass
 
+    def Shuffle(self):
+        np.random.shuffle(self.train_samples)
+
     def NextBatch(self, batch_size=100, data_type='train'):
         if self.mode == 'all':
-            self.NextBatchAll(batch_size, data_type)
+            yield self.NextBatchAll(batch_size, data_type)
         elif self.mode == 'queue':
-            return self.NextBatchQueue()
+            yield self.NextBatchQueue()
 
     def NextBatchAll(self, batch_size, data_type):
         samples = self.train_samples
         if data_type != 'train':
             samples = self.test_samples
-        n = samples.shape[0]
+        n = np.shape(samples)[0]
         for s in xrange(0, n, batch_size):
             e = s+batch_size if s+batch_size<n else n
-            yield samples[s:e]
+            return samples[s:e]
 
     def NextBatchQueue(self):
         pass
@@ -165,6 +187,9 @@ if FLAGS.job_name == 'ps':
 elif FLAGS.job_name == 'worker':
     info('start ...')
     is_chief = (FLAGS.task_index == 0)
+    data_provider = DataProvider(num_workers, FLAGS.task_index, FLAGS.thread_num, 'all')
+    data_provider.LoadData()
+
     with tf.device(tf.train.replica_device_setter(
         worker_device = '/job:worker/task:%d' % FLAGS.task_index
         , cluster = cluster_spec)):
@@ -184,7 +209,7 @@ elif FLAGS.job_name == 'worker':
             sp_fids = tf.SparseTensor(shape=x_shape, indices=x_indices, values=x_fids)
             sp_fvals = tf.SparseTensor(shape=x_shape, indices=x_indices, values=x_fvals)
 
-            y = tf.placeholder(tf.int8, [None, 1])
+            y = tf.placeholder(tf.float32, [None, 1])
 
         # model
         with tf.name_scope('weights'):
@@ -194,8 +219,8 @@ elif FLAGS.job_name == 'worker':
             b = tf.Variable(tf.zeros([1]))
 
         with tf.name_scope('loss'):
-            py_x = tf.nn.embedding_lookup_sparse(W, sp_fids, sp_fvals, combiner='sum')
-            cross_entropy = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(py_x, y))
+            py_x = tf.add(tf.nn.embedding_lookup_sparse(W, sp_fids, sp_fvals, combiner='sum'), b)
+            cross_entropy = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(py_x, y))
 
         with tf.name_scope('train'):
             grad_op = tf.train.GradientDescentOptimizer(learning_rate)
@@ -216,8 +241,49 @@ elif FLAGS.job_name == 'worker':
 
         config = tf.ConfigProto(allow_soft_placement = True)
 
-        info('Start session.')
+        info('Start session ...')
 
     with supervisor.managed_session(server.target) as sess:
         sess.run(init_op)
+
+        info('Start train ...')
+        step_num = 0
+        iter_num = 0
+        while iter_num < num_epochs:
+            data_provider.Shuffle()
+            for batch_samples in data_provider.NextBatch(batch_size=100, data_type='train'):
+                labels, fids, fvals, sp_indices, batch_size = Sample.format_samples_sparse(batch_samples)
+                _ = sess.run([train_op], feed_dict = {
+                    y: labels
+                    , x_shape: [num_features, batch_size]
+                    , x_indices: sp_indices
+                    , x_fids: fids
+                    , x_fvals: fvals
+                })
+                step_num += 1
+                if step_num % 100 == 0:
+                    global_step_val, cross_entropy_val = sess.run([global_step, cross_entropy], feed_dict = {
+                        y: labels
+                        , x_shape: [num_features, batch_size]
+                        , x_indices: sp_indices
+                        , x_fids: fids
+                        , x_fvals: fvals
+                    })
+                    info('epoch: {}, local step: {}, global step: {}, loss: {}'.format(iter_num, step_num, global_step_val, cross_entropy_val))
+            iter_num += 1
+        info('Finish train.')
+
+        info('Start evaluate ...')
+        auc_val = None
+        for batch_samples in data_provider.NextBatch(batch_size=100, data_type='test'):
+            labels, fids, fvals, sp_indices, batch_size = Sample.format_samples_sparse(batch_samples)
+            auc_val = sess.run(auc_op, feed_dict = {
+                y: labels
+                , x_shape: [num_features, batch_size]
+                , x_indices: sp_indices
+                , x_fids: fids
+                , x_fvals: fvals
+            })
+        info('Finish evaluate, auc: {}'.format(auc_val))
+
 
