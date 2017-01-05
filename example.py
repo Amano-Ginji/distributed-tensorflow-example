@@ -22,13 +22,11 @@ import time
 
 # cluster specification
 parameter_servers = ["localhost:2222"]
-'''
 workers = [    "localhost:2223", 
-            "localhost:2224",
-            "localhost:2225"]
-'''
-workers = [ "localhost:2223",
             "localhost:2224"]
+'''
+workers = [ "localhost:2223"]
+'''
 cluster = tf.train.ClusterSpec({"ps":parameter_servers, "worker":workers})
 
 # input flags
@@ -44,9 +42,10 @@ server = tf.train.Server(cluster,
 # config
 batch_size = 100
 learning_rate = 0.0005
-training_epochs = 20
+training_epochs = 5
 #logs_path = "/tmp/mnist/1"
-logs_path = "/tmp/mnist/{}_{}".format(FLAGS.job_name, FLAGS.task_index)
+#logs_path = "/tmp/mnist/{}_{}".format(FLAGS.job_name, FLAGS.task_index)
+logs_path = "./logs/mnist/{}_{}".format(FLAGS.job_name, FLAGS.task_index)
 if os.path.exists(logs_path):
     os.system('rm -rf {}'.format(logs_path))
 os.mkdir(logs_path)
@@ -144,6 +143,7 @@ elif FLAGS.job_name == "worker":
     begin_time = time.time()
     frequency = 100
     with sv.prepare_or_wait_for_session(server.target) as sess:
+        tf.logging.info("go into sv.prepare")
         '''
         # is chief
         if FLAGS.task_index == 0:

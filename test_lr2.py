@@ -18,8 +18,9 @@ class TestDataProvider(unittest.TestCase):
         FLAGS.test_file_list = ''
 
     def testInit(self):
-        data_provider = DataProvider(2, 0, mode='all')
-        self.assertEqual(len(data_provider.samples), 685)
+        data_provider = DataProvider(1, 0, 2, mode='all')
+        data_provider.LoadData()
+        self.assertEqual(len(data_provider.GetTrainSamples()), 685)
 
 if __name__ == '__main__':
     unittest.main()
