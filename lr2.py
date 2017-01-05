@@ -28,13 +28,6 @@ flags.DEFINE_string('train_file_list', 'hdfs://localhost:9000/user/yaowq/tensorf
 flags.DEFINE_string('test_file_list', 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/data/test_file_list', 'test file list')
 
 
-cluster_conf = json.load(open('cluster_conf.json', "r"))
-cluster_spec = tf.train.ClusterSpec(cluster_conf)
-num_workers = len(cluster_conf['worker'])
-
-server = tf.train.Server(cluster_spec, job_name=FLAGS.job_name, task_index=FLAGS.task_index)
-
-
 def debug(msg):
     tf.logging.debug('%s: %d, msg: %s' % (FLAGS.job_name, FLAGS.task_index, msg))
 
@@ -129,14 +122,20 @@ class DataProvider:
     def LoadDataQueue(self):
         pass
 
-    def NextBatch(self):
+    def NextBatch(self, batch_size=100, data_type='train'):
         if self.mode == 'all':
-            return self.NextBatchAll()
+            self.NextBatchAll(batch_size, data_type)
         elif self.mode == 'queue':
             return self.NextBatchQueue()
 
-    def NextBatchAll(self):
-        pass
+    def NextBatchAll(self, batch_size, data_type):
+        samples = self.train_samples
+        if data_type != 'train':
+            samples = self.test_samples
+        n = samples.shape[0]
+        for s in xrange(0, n, batch_size):
+            e = s+batch_size if s+batch_size<n else n
+            yield samples[s:e]
 
     def NextBatchQueue(self):
         pass
@@ -147,4 +146,78 @@ class DataProvider:
         train_file_list_gfile.close()
         return [line.strip() for line in lines[task_index:len(lines):num_workers]]
 
+
+learning_rate = FLAGS.learning_rate
+num_epochs = FLAGS.num_epochs
+batch_size = FLAGS.batch_size
+num_features = FLAGS.features
+
+cluster_conf = json.load(open('cluster_conf.json', "r"))
+cluster_spec = tf.train.ClusterSpec(cluster_conf)
+num_workers = len(cluster_conf['worker'])
+
+server = tf.train.Server(cluster_spec, job_name=FLAGS.job_name, task_index=FLAGS.task_index)
+
+if FLAGS.job_name == 'ps':
+    info('start ...')
+    server.join()
+
+elif FLAGS.job_name == 'worker':
+    info('start ...')
+    is_chief = (FLAGS.task_index == 0)
+    with tf.device(tf.train.replica_device_setter(
+        worker_device = '/job:worker/task:%d' % FLAGS.task_index
+        , cluster = cluster_spec)):
+
+        # global
+        global_step = tf.get_variable('global_step', []
+            , initializer = tf.constant_initializer(0)
+            , trainable = False)
+
+        # input
+        with tf.name_scope('input'):
+            x_shape = tf.placeholder(tf.int64)
+            x_indices = tf.placeholder(tf.int64)
+            x_fids = tf.placeholder(tf.int64)
+            x_fvals = tf.placeholder(tf.float32)
+
+            sp_fids = tf.SparseTensor(shape=x_shape, indices=x_indices, values=x_fids)
+            sp_fvals = tf.SparseTensor(shape=x_shape, indices=x_indices, values=x_fvals)
+
+            y = tf.placeholder(tf.int8, [None, 1])
+
+        # model
+        with tf.name_scope('weights'):
+            W = tf.Variable(tf.random_normal([num_features, 1]))
+
+        with tf.name_scope('bias'):
+            b = tf.Variable(tf.zeros([1]))
+
+        with tf.name_scope('loss'):
+            py_x = tf.nn.embedding_lookup_sparse(W, sp_fids, sp_fvals, combiner='sum')
+            cross_entropy = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(py_x, y))
+
+        with tf.name_scope('train'):
+            grad_op = tf.train.GradientDescentOptimizer(learning_rate)
+            train_op = grad_op.minimize(cross_entropy, global_step=global_step)
+
+        with tf.name_scope('evaluate'):
+            predict_op = tf.nn.sigmoid(py_x)
+            auc_op = tf.contrib.metrics.streaming_auc(predict_op, y)
+
+        # summary
+        tf.scalar_summary('cost', cross_entropy)
+        summary_op = tf.merge_all_summaries()
+
+        init = [tf.global_variables_initializer(), tf.local_variables_initializer()]
+        init_op = tf.global_variables_initializer()
+
+        supervisor = tf.train.Supervisor(is_chief=is_chief, init_op=init, global_step=global_step)
+
+        config = tf.ConfigProto(allow_soft_placement = True)
+
+        info('Start session.')
+
+    with supervisor.managed_session(server.target) as sess:
+        sess.run(init_op)
 
