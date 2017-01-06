@@ -27,6 +27,7 @@ flags.DEFINE_string('test', 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/data
 flags.DEFINE_string('checkpoint', 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/checkpoint', 'checkpoint file')
 flags.DEFINE_string('train_file_list', 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/data/train_file_list', 'train file list')
 flags.DEFINE_string('test_file_list', 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/data/test_file_list', 'test file list')
+flags.DEFINE_integer('trace_step_interval', 10000, 'number of steps to output info')
 
 
 def debug(msg):
@@ -145,10 +146,17 @@ class DataProvider:
         np.random.shuffle(self.train_samples)
 
     def NextBatch(self, batch_size=100, data_type='train'):
-        if self.mode == 'all':
-            yield self.NextBatchAll(batch_size, data_type)
-        elif self.mode == 'queue':
-            yield self.NextBatchQueue()
+        if self.mode == 'all': # fetch from full queue
+            #self.NextBatchAll(batch_size, data_type)
+            samples = self.train_samples
+            if data_type != 'train':
+                samples = self.test_samples
+            n = np.shape(samples)[0]
+            for s in xrange(0, n, batch_size):
+                e = s+batch_size if s+batch_size<n else n
+                yield samples[s:e]
+        elif self.mode == 'queue': # fetch from partial queue
+            self.NextBatchQueue()
 
     def NextBatchAll(self, batch_size, data_type):
         samples = self.train_samples
@@ -157,7 +165,7 @@ class DataProvider:
         n = np.shape(samples)[0]
         for s in xrange(0, n, batch_size):
             e = s+batch_size if s+batch_size<n else n
-            return samples[s:e]
+            yield samples[s:e]
 
     def NextBatchQueue(self):
         pass
@@ -169,10 +177,22 @@ class DataProvider:
         return [line.strip() for line in lines[task_index:len(lines):num_workers]]
 
 
+def Trace(sess, iter_num, step_num, global_step, cross_entropy, labels, num_features, batch_size, sp_indices, fids, fvals):
+    global_step_val, cross_entropy_val = sess.run([global_step, cross_entropy], feed_dict = {
+        y: labels
+        , x_shape: [num_features, batch_size]
+        , x_indices: sp_indices
+        , x_fids: fids
+        , x_fvals: fvals
+    })
+    info('epoch: {}, local step: {}, global step: {}, loss: {}'.format(iter_num, step_num, global_step_val, cross_entropy_val))
+
+
 learning_rate = FLAGS.learning_rate
 num_epochs = FLAGS.num_epochs
 batch_size = FLAGS.batch_size
 num_features = FLAGS.features
+trace_step_interval = FLAGS.trace_step_interval
 
 cluster_conf = json.load(open('cluster_conf.json', "r"))
 cluster_spec = tf.train.ClusterSpec(cluster_conf)
@@ -243,15 +263,19 @@ elif FLAGS.job_name == 'worker':
 
         info('Start session ...')
 
-    with supervisor.managed_session(server.target) as sess:
+    #with supervisor.managed_session(server.target) as sess:
+    with supervisor.prepare_or_wait_for_session(server.target, config=config) as sess:
         sess.run(init_op)
 
         info('Start train ...')
         step_num = 0
         iter_num = 0
+        info('num_epochs: %d' % num_epochs)
         while iter_num < num_epochs:
             data_provider.Shuffle()
             for batch_samples in data_provider.NextBatch(batch_size=100, data_type='train'):
+                if batch_samples == None or len(batch_samples) <= 0:
+                    break
                 labels, fids, fvals, sp_indices, batch_size = Sample.format_samples_sparse(batch_samples)
                 _ = sess.run([train_op], feed_dict = {
                     y: labels
@@ -261,21 +285,18 @@ elif FLAGS.job_name == 'worker':
                     , x_fvals: fvals
                 })
                 step_num += 1
-                if step_num % 100 == 0:
-                    global_step_val, cross_entropy_val = sess.run([global_step, cross_entropy], feed_dict = {
-                        y: labels
-                        , x_shape: [num_features, batch_size]
-                        , x_indices: sp_indices
-                        , x_fids: fids
-                        , x_fvals: fvals
-                    })
-                    info('epoch: {}, local step: {}, global step: {}, loss: {}'.format(iter_num, step_num, global_step_val, cross_entropy_val))
+                if step_num % trace_step_interval == 0:
+                    Trace(sess, iter_num, step_num, global_step, cross_entropy, labels, num_features, batch_size, sp_indices, fids, fvals)
             iter_num += 1
+            Trace(sess, iter_num, step_num, global_step, cross_entropy, labels, num_features, batch_size, sp_indices, fids, fvals)
+            
         info('Finish train.')
 
         info('Start evaluate ...')
         auc_val = None
         for batch_samples in data_provider.NextBatch(batch_size=100, data_type='test'):
+            if batch_samples == None or len(batch_samples) <= 0:
+                break
             labels, fids, fvals, sp_indices, batch_size = Sample.format_samples_sparse(batch_samples)
             auc_val = sess.run(auc_op, feed_dict = {
                 y: labels
@@ -285,5 +306,4 @@ elif FLAGS.job_name == 'worker':
                 , x_fvals: fvals
             })
         info('Finish evaluate, auc: {}'.format(auc_val))
-
 
