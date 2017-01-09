@@ -107,8 +107,12 @@ class DataProvider:
 
         self.train_samples = []
         self.test_samples = []
+        '''
         self.train_file_list = self.GetFileList(FLAGS.train_file_list, num_workers, task_index)
         self.test_file_list = self.GetFileList(FLAGS.test_file_list, num_workers, task_index)
+        '''
+        self.train_file_list = self.GetFileList(FLAGS.train, num_workers, task_index)
+        self.test_file_list = self.GetFileList(FLAGS.test, num_workers, task_index)
 
         self.train_threads = self.InitThreads(self.train_file_list, len(self.train_file_list), self.thread_num)
         self.test_threads = self.InitThreads(self.test_file_list, len(self.test_file_list), self.thread_num)
@@ -174,11 +178,17 @@ class DataProvider:
     def NextBatchQueue(self):
         pass
 
+    '''
     def GetFileList(self, file_list, num_workers, task_index):
         train_file_list_gfile = tf.gfile.GFile(file_list, mode="r")
         lines = train_file_list_gfile.readlines()
         train_file_list_gfile.close()
         return [line.strip() for line in lines[task_index:len(lines):num_workers]]
+    '''
+
+    def GetFileList(self, input_files, num_workers, task_index):
+        file_list = input_files.strip(",").split(",")
+        return [f.strip() for f in file_list[task_index:len(file_list):num_workers]]
 
 
 def Test(sess, iter_num, step_num, global_step, cross_entropy, labels, num_features, batch_size, sp_indices, fids, fvals):
