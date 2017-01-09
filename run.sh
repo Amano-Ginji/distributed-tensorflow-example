@@ -13,6 +13,15 @@ DEFINE_string 'test' 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/data/test' 
 DEFINE_string 'train_file_list' 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/data/train_file_list' 'train file list'
 DEFINE_string 'test_file_list' 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/data/test_file_list' 'test file list'
 
+# parse the command-line
+FLAGS "$@" || exit 1
+eval set -- "${FLAGS_ARGV}"
+if [[ ${print_help} == true ]];then
+    ./${0} --help
+    exit 1
+fi
+set -x
+
 function get_file_list() {
   input_path=$1
   file_list=$2

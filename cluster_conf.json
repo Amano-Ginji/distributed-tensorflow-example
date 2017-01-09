@@ -3,7 +3,6 @@
         "localhost:2222"
     ],
     "worker": [
-        "localhost:2223",
-        "localhost:2224"
+        "localhost:2223"
     ]
 }

@@ -119,6 +119,10 @@ class DataProvider:
     def GetTestSamples(self):
         return self.test_samples
 
+    def GetTestSamplesSampled(self, sampling_rate=1.0, sampling_max_num=1000000):
+        return Sample.format_samples_sparse(np.random.choice(self.test_samples, size=min(sampling_max_num,
+            sampling_rate*np.shape(self.test_samples)[0]), replace=False))
+
     def InitThreads(self, files, file_num, thread_num):
         return [LoadDataThread(tid, files[tid:file_num:thread_num]) for tid in xrange(0, thread_num)]
 
@@ -177,7 +181,7 @@ class DataProvider:
         return [line.strip() for line in lines[task_index:len(lines):num_workers]]
 
 
-def Trace(sess, iter_num, step_num, global_step, cross_entropy, labels, num_features, batch_size, sp_indices, fids, fvals):
+def Test(sess, iter_num, step_num, global_step, cross_entropy, labels, num_features, batch_size, sp_indices, fids, fvals):
     global_step_val, cross_entropy_val = sess.run([global_step, cross_entropy], feed_dict = {
         y: labels
         , x_shape: [num_features, batch_size]
@@ -188,122 +192,140 @@ def Trace(sess, iter_num, step_num, global_step, cross_entropy, labels, num_feat
     info('epoch: {}, local step: {}, global step: {}, loss: {}'.format(iter_num, step_num, global_step_val, cross_entropy_val))
 
 
-learning_rate = FLAGS.learning_rate
-num_epochs = FLAGS.num_epochs
-batch_size = FLAGS.batch_size
-num_features = FLAGS.features
-trace_step_interval = FLAGS.trace_step_interval
+def main(_):
+    info("train file list: %s" % FLAGS.train_file_list)
+    info("test file list: %s" % FLAGS.test_file_list)
 
-cluster_conf = json.load(open('cluster_conf.json', "r"))
-cluster_spec = tf.train.ClusterSpec(cluster_conf)
-num_workers = len(cluster_conf['worker'])
+    learning_rate = FLAGS.learning_rate
+    num_epochs = FLAGS.num_epochs
+    batch_size = FLAGS.batch_size
+    num_features = FLAGS.features
+    trace_step_interval = FLAGS.trace_step_interval
+    
+    cluster_conf = json.load(open('cluster_conf.json', "r"))
+    cluster_spec = tf.train.ClusterSpec(cluster_conf)
+    num_workers = len(cluster_conf['worker'])
+    
+    server = tf.train.Server(cluster_spec, job_name=FLAGS.job_name, task_index=FLAGS.task_index)
+    
+    if FLAGS.job_name == 'ps':
+        info('start ...')
+        server.join()
+    
+    elif FLAGS.job_name == 'worker':
+        info('start ...')
+        is_chief = (FLAGS.task_index == 0)
+        data_provider = DataProvider(num_workers, FLAGS.task_index, FLAGS.thread_num, 'all')
+        info('load data')
+        data_provider.LoadData()
 
-server = tf.train.Server(cluster_spec, job_name=FLAGS.job_name, task_index=FLAGS.task_index)
+        global test_data
+        test_data = data_provider.GetTestSamplesSampled(sampling_rate=0.1, sampling_max_num=1000000)
+    
+        info('build graph')
+        with tf.device(tf.train.replica_device_setter(
+            worker_device = '/job:worker/task:%d' % FLAGS.task_index
+            , cluster = cluster_spec)):
+    
+            # global
+            global_step = tf.get_variable('global_step', []
+                , initializer = tf.constant_initializer(0)
+                , trainable = False)
+    
+            # input
+            with tf.name_scope('input'):
+                global x_shape,x_indices,x_fids,x_fvals,sp_fids,sp_fvals,y
 
-if FLAGS.job_name == 'ps':
-    info('start ...')
-    server.join()
-
-elif FLAGS.job_name == 'worker':
-    info('start ...')
-    is_chief = (FLAGS.task_index == 0)
-    data_provider = DataProvider(num_workers, FLAGS.task_index, FLAGS.thread_num, 'all')
-    data_provider.LoadData()
-
-    with tf.device(tf.train.replica_device_setter(
-        worker_device = '/job:worker/task:%d' % FLAGS.task_index
-        , cluster = cluster_spec)):
-
-        # global
-        global_step = tf.get_variable('global_step', []
-            , initializer = tf.constant_initializer(0)
-            , trainable = False)
-
-        # input
-        with tf.name_scope('input'):
-            x_shape = tf.placeholder(tf.int64)
-            x_indices = tf.placeholder(tf.int64)
-            x_fids = tf.placeholder(tf.int64)
-            x_fvals = tf.placeholder(tf.float32)
-
-            sp_fids = tf.SparseTensor(shape=x_shape, indices=x_indices, values=x_fids)
-            sp_fvals = tf.SparseTensor(shape=x_shape, indices=x_indices, values=x_fvals)
-
-            y = tf.placeholder(tf.float32, [None, 1])
-
-        # model
-        with tf.name_scope('weights'):
-            W = tf.Variable(tf.random_normal([num_features, 1]))
-
-        with tf.name_scope('bias'):
-            b = tf.Variable(tf.zeros([1]))
-
-        with tf.name_scope('loss'):
-            py_x = tf.add(tf.nn.embedding_lookup_sparse(W, sp_fids, sp_fvals, combiner='sum'), b)
-            cross_entropy = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(py_x, y))
-
-        with tf.name_scope('train'):
-            grad_op = tf.train.GradientDescentOptimizer(learning_rate)
-            train_op = grad_op.minimize(cross_entropy, global_step=global_step)
-
-        with tf.name_scope('evaluate'):
-            predict_op = tf.nn.sigmoid(py_x)
-            auc_op = tf.contrib.metrics.streaming_auc(predict_op, y)
-
-        # summary
-        tf.scalar_summary('cost', cross_entropy)
-        summary_op = tf.merge_all_summaries()
-
-        init = [tf.global_variables_initializer(), tf.local_variables_initializer()]
-        init_op = tf.global_variables_initializer()
-
-        supervisor = tf.train.Supervisor(is_chief=is_chief, init_op=init, global_step=global_step)
-
-        config = tf.ConfigProto(allow_soft_placement = True)
-
+                x_shape = tf.placeholder(tf.int64)
+                x_indices = tf.placeholder(tf.int64)
+                x_fids = tf.placeholder(tf.int64)
+                x_fvals = tf.placeholder(tf.float32)
+    
+                sp_fids = tf.SparseTensor(shape=x_shape, indices=x_indices, values=x_fids)
+                sp_fvals = tf.SparseTensor(shape=x_shape, indices=x_indices, values=x_fvals)
+    
+                y = tf.placeholder(tf.float32, [None, 1])
+    
+            # model
+            with tf.name_scope('weights'):
+                W = tf.Variable(tf.random_normal([num_features, 1]))
+    
+            with tf.name_scope('bias'):
+                b = tf.Variable(tf.zeros([1]))
+    
+            with tf.name_scope('loss'):
+                py_x = tf.add(tf.nn.embedding_lookup_sparse(W, sp_fids, sp_fvals, combiner='sum'), b)
+                cross_entropy = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(py_x, y))
+                #cross_entropy = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(py_x, y))
+    
+            with tf.name_scope('train'):
+                grad_op = tf.train.GradientDescentOptimizer(learning_rate)
+                train_op = grad_op.minimize(cross_entropy, global_step=global_step)
+    
+            with tf.name_scope('evaluate'):
+                predict_op = tf.nn.sigmoid(py_x)
+                auc_op = tf.contrib.metrics.streaming_auc(predict_op, y)
+    
+            # summary
+            tf.scalar_summary('cost', cross_entropy)
+            summary_op = tf.merge_all_summaries()
+    
+            init = [tf.global_variables_initializer(), tf.local_variables_initializer()]
+            init_op = tf.global_variables_initializer()
+    
+            supervisor = tf.train.Supervisor(is_chief=is_chief, init_op=init, global_step=global_step)
+    
+            config = tf.ConfigProto(allow_soft_placement = True)
+    
         info('Start session ...')
-
-    #with supervisor.managed_session(server.target) as sess:
-    with supervisor.prepare_or_wait_for_session(server.target, config=config) as sess:
-        sess.run(init_op)
-
-        info('Start train ...')
-        step_num = 0
-        iter_num = 0
-        info('num_epochs: %d' % num_epochs)
-        while iter_num < num_epochs:
-            data_provider.Shuffle()
-            for batch_samples in data_provider.NextBatch(batch_size=100, data_type='train'):
+    
+        #with supervisor.managed_session(server.target) as sess:
+        with supervisor.prepare_or_wait_for_session(server.target, config=config) as sess:
+            sess.run(init_op)
+    
+            info('Start train ...')
+            step_num = 0
+            iter_num = 0
+            info('num_epochs: %d' % num_epochs)
+            while iter_num < num_epochs:
+                data_provider.Shuffle()
+                for batch_samples in data_provider.NextBatch(batch_size=100, data_type='train'):
+                    if batch_samples == None or len(batch_samples) <= 0:
+                        break
+                    labels, fids, fvals, sp_indices, batch_size = Sample.format_samples_sparse(batch_samples)
+                    _ = sess.run([train_op], feed_dict = {
+                        y: labels
+                        , x_shape: [num_features, batch_size]
+                        , x_indices: sp_indices
+                        , x_fids: fids
+                        , x_fvals: fvals
+                    })
+                    step_num += 1
+                    if step_num % trace_step_interval == 0:
+                        #Test(sess, iter_num, step_num, global_step, cross_entropy, labels, num_features, batch_size, sp_indices, fids, fvals)
+                        Test(sess, iter_num, step_num, global_step, cross_entropy, test_data[0], num_features, test_data[4], test_data[3], test_data[1], test_data[2])
+                #Test(sess, iter_num, step_num, global_step, cross_entropy, labels, num_features, batch_size, sp_indices, fids, fvals)
+                Test(sess, iter_num, step_num, global_step, cross_entropy, test_data[0], num_features, test_data[4], test_data[3], test_data[1], test_data[2])
+                iter_num += 1
+                
+            info('Finish train.')
+    
+            info('Start evaluate ...')
+            auc_val = None
+            for batch_samples in data_provider.NextBatch(batch_size=100, data_type='test'):
                 if batch_samples == None or len(batch_samples) <= 0:
                     break
                 labels, fids, fvals, sp_indices, batch_size = Sample.format_samples_sparse(batch_samples)
-                _ = sess.run([train_op], feed_dict = {
+                auc_val = sess.run(auc_op, feed_dict = {
                     y: labels
                     , x_shape: [num_features, batch_size]
                     , x_indices: sp_indices
                     , x_fids: fids
                     , x_fvals: fvals
                 })
-                step_num += 1
-                if step_num % trace_step_interval == 0:
-                    Trace(sess, iter_num, step_num, global_step, cross_entropy, labels, num_features, batch_size, sp_indices, fids, fvals)
-            iter_num += 1
-            Trace(sess, iter_num, step_num, global_step, cross_entropy, labels, num_features, batch_size, sp_indices, fids, fvals)
-            
-        info('Finish train.')
+            info('Finish evaluate, auc: {}'.format(auc_val))
 
-        info('Start evaluate ...')
-        auc_val = None
-        for batch_samples in data_provider.NextBatch(batch_size=100, data_type='test'):
-            if batch_samples == None or len(batch_samples) <= 0:
-                break
-            labels, fids, fvals, sp_indices, batch_size = Sample.format_samples_sparse(batch_samples)
-            auc_val = sess.run(auc_op, feed_dict = {
-                y: labels
-                , x_shape: [num_features, batch_size]
-                , x_indices: sp_indices
-                , x_fids: fids
-                , x_fvals: fvals
-            })
-        info('Finish evaluate, auc: {}'.format(auc_val))
+
+if __name__ == "__main__":
+    tf.app.run(main=main)
 
