@@ -203,9 +203,6 @@ def Test(sess, iter_num, step_num, global_step, cross_entropy, labels, num_featu
 
 
 def main(_):
-    info("train file list: %s" % FLAGS.train_file_list)
-    info("test file list: %s" % FLAGS.test_file_list)
-
     learning_rate = FLAGS.learning_rate
     num_epochs = FLAGS.num_epochs
     batch_size = FLAGS.batch_size

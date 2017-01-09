@@ -23,31 +23,6 @@ if [[ ${print_help} == true ]];then
 fi
 set -x
 
-:<<comment
-function get_file_list() {
-  input_path=$1
-  file_list=$2
-  file_type=$3
-  
-  hadoop fs -test -e ${file_list} && \
-    hadoop fs -rm -r ${file_list}
-
-  hadoop fs -ls ${input_path} | \
-    awk -F" " 'NF>7{print $8;}' > \
-    $data/${file_type}_file_list
-
-  hadoop fs -put $data/${file_type}_file_list ${file_list}
-}
-
-get_file_list ${FLAGS_train} ${FLAGS_train_file_list} "train"
-get_file_list ${FLAGS_test} ${FLAGS_test_file_list} "test"
-
-# submit job
-#/usr/local/python-2.7.2/bin/tf_tool -a "LR" -c lr2.json lr2.py --batch_size=500 --num_epochs=10 --train="hdfs://10.50.64.84:8020/user/datamining/yaowq/ftrl_dn_2016122106" --test="hdfs://10.50.64.84:8020/user/datamining/yaowq/ftrl_dn_2016122106" --features=100000000
-
-#/usr/local/python-2.7.2/bin/tf_tool -a "LR" -c lr2.json lr2.py --batch_size=500 --num_epochs=50 --features=100000000 --thread_num=8 --learning_rate=1 --trace_step_interval=10000000 --train_file_list="hdfs://10.50.64.84:8020/user/datamining/yaowq/ftrl/data_list/train_file_list_2016122106" --test_file_list="hdfs://10.50.64.84:8020/user/datamining/yaowq/ftrl/data_list/test_file_list_2016122106"
-comment
-
 
 function get_file_list() {
   input_path=$1
@@ -67,11 +42,11 @@ if [ ${FLAGS_mode} == 'product' ]; then
   /usr/local/python-2.7.2/bin/tf_tool -a "LR" -c lr2.json lr2.py \
     --batch_size=500 --num_epochs=50 --features=100000000 \
     --thread_num=8 --learning_rate=1 --trace_step_interval=10000000 \
-    --train="${train_data}" --test_file_list="${test_data}";
+    --train="${train_data}" --test="${test_data}"
 else
   HADOOP_HDFS_HOME="/usr/local/hadoop" python lr2.py \
     --job_name=${FLAGS_job_name} --task_index=${FLAGS_task_index} \
-    --train="${train_data}" --test_file_list="${test_data}";
+    --train="${train_data}" --test="${test_data}"
 fi
 
 
