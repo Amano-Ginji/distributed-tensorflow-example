@@ -4,6 +4,8 @@ import numpy as np
 import sys
 import json
 import re
+import time
+import random
 
 import threading
 
@@ -28,16 +30,21 @@ flags.DEFINE_string('checkpoint', 'hdfs://localhost:9000/user/yaowq/tensorflow/l
 flags.DEFINE_string('train_file_list', 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/data/train_file_list', 'train file list')
 flags.DEFINE_string('test_file_list', 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/data/test_file_list', 'test file list')
 flags.DEFINE_integer('trace_step_interval', 10000, 'number of steps to output info')
+flags.DEFINE_float('train_sampling_rate', 1.0, 'samling rate for train file')
+flags.DEFINE_float('test_sampling_rate', 1.0, 'samling rate for test file')
 
 
 def debug(msg):
-    tf.logging.debug(' [%s:%d] %s' % (FLAGS.job_name, FLAGS.task_index, msg))
+    tm = time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time()))
+    tf.logging.debug(' [%s] [%s:%d] %s' % (tm, FLAGS.job_name, FLAGS.task_index, msg))
 
 def info(msg):
-    tf.logging.info(' [%s:%d] %s' % (FLAGS.job_name, FLAGS.task_index, msg))
+    tm = time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time()))
+    tf.logging.info(' [%s] [%s:%d] %s' % (tm, FLAGS.job_name, FLAGS.task_index, msg))
 
 def error(msg):
-    tf.logging.error('[%s:%d] %s' % FLAGS.job_name, FLAGS.task_index, msg)
+    tm = time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(time.time()))
+    tf.logging.error(' [%s] [%s:%d] %s' % (tm, FLAGS.job_name, FLAGS.task_index, msg))
 
 
 class Sample:
@@ -77,11 +84,12 @@ class Sample:
         
 
 class LoadDataThread(threading.Thread):
-    def __init__(self, tid, files):
+    def __init__(self, tid, files, sampling_rate):
         threading.Thread.__init__(self)
         self.samples = []
         self.tid = tid
         self.files = files
+        self.sampling_rate = sampling_rate
 
     def run(self):
         for file_name in self.files:
@@ -89,7 +97,7 @@ class LoadDataThread(threading.Thread):
             lines_num = 0
             # TODO(yaowq): rewrite to batch generator mode
             for line in tf.gfile.GFile(file_name, mode='r'):
-                if line == None or len(line) < 2:
+                if line == None or len(line) < 2 or random.random()<1-self.sampling_rate:
                     continue
                 sample = Sample()
                 sample.parse_line_libsvm(line)
@@ -114,8 +122,8 @@ class DataProvider:
         self.train_file_list = self.GetFileList(FLAGS.train, num_workers, task_index)
         self.test_file_list = self.GetFileList(FLAGS.test, num_workers, task_index)
 
-        self.train_threads = self.InitThreads(self.train_file_list, len(self.train_file_list), self.thread_num)
-        self.test_threads = self.InitThreads(self.test_file_list, len(self.test_file_list), self.thread_num)
+        self.train_threads = self.InitThreads(self.train_file_list, len(self.train_file_list), self.thread_num, FLAGS.train_sampling_rate)
+        self.test_threads = self.InitThreads(self.test_file_list, len(self.test_file_list), self.thread_num, FLAGS.test_sampling_rate)
 
     def GetTrainSamples(self):
         return self.train_samples
@@ -125,10 +133,10 @@ class DataProvider:
 
     def GetTestSamplesSampled(self, sampling_rate=1.0, sampling_max_num=1000000):
         return Sample.format_samples_sparse(np.random.choice(self.test_samples, size=min(sampling_max_num,
-            sampling_rate*np.shape(self.test_samples)[0]), replace=False))
+            int(sampling_rate*np.shape(self.test_samples)[0])), replace=False))
 
-    def InitThreads(self, files, file_num, thread_num):
-        return [LoadDataThread(tid, files[tid:file_num:thread_num]) for tid in xrange(0, thread_num)]
+    def InitThreads(self, files, file_num, thread_num, sampling_rate=1.0):
+        return [LoadDataThread(tid, files[tid:file_num:thread_num], sampling_rate) for tid in xrange(0, thread_num)]
 
     def LoadData(self):
         if self.mode == 'all':
@@ -227,7 +235,8 @@ def main(_):
         data_provider.LoadData()
 
         global test_data
-        test_data = data_provider.GetTestSamplesSampled(sampling_rate=0.1, sampling_max_num=1000000)
+        #test_data = data_provider.GetTestSamplesSampled(sampling_rate=0.1, sampling_max_num=1000000)
+        test_data = data_provider.GetTestSamplesSampled()
     
         info('build graph')
         with tf.device(tf.train.replica_device_setter(
@@ -273,9 +282,11 @@ def main(_):
                 predict_op = tf.nn.sigmoid(py_x)
                 auc_op = tf.contrib.metrics.streaming_auc(predict_op, y)
     
+            '''
             # summary
             tf.scalar_summary('cost', cross_entropy)
             summary_op = tf.merge_all_summaries()
+            '''
     
             init = [tf.global_variables_initializer(), tf.local_variables_initializer()]
             init_op = tf.global_variables_initializer()
@@ -309,9 +320,7 @@ def main(_):
                     })
                     step_num += 1
                     if step_num % trace_step_interval == 0:
-                        #Test(sess, iter_num, step_num, global_step, cross_entropy, labels, num_features, batch_size, sp_indices, fids, fvals)
                         Test(sess, iter_num, step_num, global_step, cross_entropy, test_data[0], num_features, test_data[4], test_data[3], test_data[1], test_data[2])
-                #Test(sess, iter_num, step_num, global_step, cross_entropy, labels, num_features, batch_size, sp_indices, fids, fvals)
                 Test(sess, iter_num, step_num, global_step, cross_entropy, test_data[0], num_features, test_data[4], test_data[3], test_data[1], test_data[2])
                 iter_num += 1
                 
