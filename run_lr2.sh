@@ -14,6 +14,12 @@ DEFINE_string 'run_mode' 'product' 'run mode, product or test'
 DEFINE_string 'output' 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/output' 'output root hdfs path'
 DEFINE_string 'load_mode' 'queue' 'load mode, all or queue'
 
+DEFINE_float 'learning_rate' '0.001' 'learning_rate'
+DEFINE_integer 'num_epochs' 120 'Number of epochs to run trainer.'
+DEFINE_integer 'batch_size' 500 'Batch size. Must divide evenly into the dataset sizes.'
+DEFINE_integer 'features' 4762348 'Feature size'
+
+
 # parse the command-line
 FLAGS "$@" || exit 1
 eval set -- "${FLAGS_ARGV}"
@@ -57,7 +63,11 @@ else
   HADOOP_HDFS_HOME="/usr/local/hadoop" python lr2.py \
     --job_name=${FLAGS_job_name} --task_index=${FLAGS_task_index} \
     --train=${train_data} --test=${test_data} \
-    --mode=${FLAGS_load_mode}
+    --mode=${FLAGS_load_mode} \
+    --learning_rate=${FLAGS_learning_rate} \
+    --num_epochs=${FLAGS_num_epochs} \
+    --batch_size=${FLAGS_batch_size} \
+    --features=${FLAGS_features}
 fi
 
 

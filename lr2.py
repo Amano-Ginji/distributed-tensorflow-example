@@ -12,7 +12,7 @@ import threading
 import tensorflow as tf
 from tensorflow.python.platform import tf_logging as logging
 
-tf.logging.set_verbosity(tf.logging.DEBUG)
+tf.logging.set_verbosity(tf.logging.INFO)
 
 flags = tf.app.flags
 FLAGS = flags.FLAGS
@@ -115,7 +115,7 @@ class LoadDataThread(threading.Thread):
             lines = []
             while True:
                 for file_name in self.files:
-                    #info('thread: %d, input file: %s' % (self.tid, file_name))
+                    debug('thread: %d, input file: %s' % (self.tid, file_name))
                     lines_num = 0
 
                     # TODO(yaowq): rewrite to batch generator mode
@@ -151,11 +151,8 @@ class LoadDataThread(threading.Thread):
                         lines.append([line])
                         lines_num += 1
                         total_lines_num += 1
-                    info("thread: %d, input file: %s, samples: %d, total samples: %d" % (self.tid, file_name, lines_num, total_lines_num))
-                    print("train data queue: ", DataProvider.train_data_queue)
-                    print("test data queue: ", DataProvider.test_data_queue)
-                #time.sleep(1)
-            #info("thread: %d, samples: %d" % (self.tid, total_lines_num))
+                    debug("thread: %d, input file: %s, samples: %d, total samples: %d" % (self.tid, file_name, lines_num, total_lines_num))
+            debug("thread: %d, samples: %d" % (self.tid, total_lines_num))
             
 
 class DataProvider:
@@ -276,7 +273,7 @@ class DataProvider:
             data_batch = DataProvider.train_data_batch if data_type == 'train' else DataProvider.test_data_batch
             curr_data_batch = self.sess.run(data_batch)
             samples_batch = []
-            for line in curr_data_batch:
+            for line in curr_data_batch[0]:
                 sample = Sample()
                 sample.parse_line_libsvm(line)
                 samples_batch.append(sample) 
@@ -296,8 +293,7 @@ class DataProvider:
         data_batch = DataProvider.train_data_batch if data_type == 'train' else DataProvider.test_data_batch
         curr_data_batch = self.sess.run(data_batch)
         samples_batch = []
-        for elem in curr_data_batch:
-            line = elem[0]
+        for line in curr_data_batch[0]:
             sample = Sample()
             sample.parse_line_libsvm(line)
             samples_batch.append(sample) 
@@ -430,31 +426,7 @@ def main(_):
             info('sampling test data ...')
             global test_data
             test_data = data_provider.GetTestSamplesSampled(sampling_rate=0.1, sampling_max_num=1000)
-            print("--------- shape: ")
-            print(np.shape(test_data))
-            print(test_data)
-            '''
-            while True:
-                try:
-                    #test_data = data_provider.GetTestSamplesSampled()
-                    #test_data = data_provider.NextBatch(data_type='train')
 
-                    #data_batch = DataProvider.train_data_batch
-                    #train_sample = sess.run(data_batch)
-                    train_sample = data_provider.NextBatchQueue(data_type='train')
-                    print("------ len: {}".format(len(train_sample)))
-                    print(np.shape(train_sample))
-                    print(train_sample)
-                except Exception,e:
-                    print("ignore exception: ", e)
-                time.sleep(1)
-            '''
-
-            '''
-            info('get train data batch ...')
-            curr_data_batch = sess.run(DataProvider.train_data_batch, options=DataProvider.run_options)
-            print("current data batch: ", curr_data_batch)
-    
             info('Start train ...')
             step_num = 0
             iter_num = 0
@@ -494,18 +466,14 @@ def main(_):
                     , x_fvals: fvals
                 })
             info('Finish evaluate, auc: {}'.format(auc_val))
-            '''
-        '''
+
         # close data queue and session
         if FLAGS.mode == 'queue':
             sess.run(DataProvider.train_data_queue.close(cancel_pending_enqueues=True))
-            DataProvider.train_coord.request_stop()
-            DataProvider.train_coord.join(DataProvider.train_threads_dequeue)
             sess.run(DataProvider.test_data_queue.close(cancel_pending_enqueues=True))
-            DataProvider.test_coord.request_stop()
-            DataProvider.test_coord.join(DataProvider.test_threads_dequeue)
+            DataProvider.coord.request_stop()
+            DataProvider.coord.join(DataProvider.threads_dequeue)
         sess.close()
-        '''
 
 
 if __name__ == "__main__":
