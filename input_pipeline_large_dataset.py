@@ -59,10 +59,13 @@ coord = tf.train.Coordinator()
 threads = tf.train.start_queue_runners(coord=coord, sess=sess)
 
 # Fetch the data from the pipeline and put it where it belongs (into your model)
-for i in range(5):
+#for i in range(5):
+for i in range(1000):
   run_options = tf.RunOptions(timeout_in_ms=4000)
   curr_data_batch, curr_target_batch = sess.run([data_batch, target_batch], options=run_options)
   print(curr_data_batch)
+
+exit(0)
 
 # shutdown everything to avoid zombies
 sess.run(queue.close(cancel_pending_enqueues=True))

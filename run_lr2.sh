@@ -10,10 +10,9 @@ DEFINE_string 'job_name' 'ps' 'job name, ps or worker' 'j'
 DEFINE_integer 'task_index' '0' 'task index' 'i'
 DEFINE_string 'train' 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/data/train' 'train file path' 't'
 DEFINE_string 'test' 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/data/test' 'test file path' 'T'
-DEFINE_string 'train_file_list' 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/data/train_file_list' 'train file list'
-DEFINE_string 'test_file_list' 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/data/test_file_list' 'test file list'
-DEFINE_string 'mode' 'product' 'run mode, product or test'
+DEFINE_string 'run_mode' 'product' 'run mode, product or test'
 DEFINE_string 'output' 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/output' 'output root hdfs path'
+DEFINE_string 'load_mode' 'queue' 'load mode, all or queue'
 
 # parse the command-line
 FLAGS "$@" || exit 1
@@ -36,7 +35,6 @@ function get_file_list() {
 
   hadoop fs -ls -R ${input_path} | \
     awk -F" " 'BEGIN{ORS=","} NF>7&&$5>1000{print $8;}'
-
 }
 
 train_data=$(get_file_list ${FLAGS_train})
@@ -44,8 +42,10 @@ test_data=$(get_file_list ${FLAGS_test})
 
 echo "train data: ${train_data}"
 echo "test data: ${test_data}"
+echo "run mode: ${FLAGS_run_mode}"
+echo "load mode: ${FLAGS_load_mode}"
 
-if [ ${FLAGS_mode} == 'product' ]; then
+if [ ${FLAGS_run_mode} == 'product' ]; then
   /usr/local/python-2.7.2/bin/tf_tool -a "LR" -c lr2.json lr2.py \
     --batch_size=500 --num_epochs=50 --features=1000000000 \
     --thread_num=8 --learning_rate=1 --trace_step_interval=10000 \
@@ -56,7 +56,8 @@ if [ ${FLAGS_mode} == 'product' ]; then
 else
   HADOOP_HDFS_HOME="/usr/local/hadoop" python lr2.py \
     --job_name=${FLAGS_job_name} --task_index=${FLAGS_task_index} \
-    --train="${train_data}" --test="${test_data}"
+    --train=${train_data} --test=${test_data} \
+    --mode=${FLAGS_load_mode}
 fi
 
 

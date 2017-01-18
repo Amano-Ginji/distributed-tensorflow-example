@@ -27,11 +27,12 @@ flags.DEFINE_integer('features', 4762348, 'Feature size')
 flags.DEFINE_string('train', 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/data/train/part-00000', 'train file')
 flags.DEFINE_string('test', 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/data/test/part-00000', 'test file')
 flags.DEFINE_string('checkpoint', 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/checkpoint', 'checkpoint file')
-flags.DEFINE_string('train_file_list', 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/data/train_file_list', 'train file list')
-flags.DEFINE_string('test_file_list', 'hdfs://localhost:9000/user/yaowq/tensorflow/lr/data/test_file_list', 'test file list')
 flags.DEFINE_integer('trace_step_interval', 10000, 'number of steps to output info')
 flags.DEFINE_float('train_sampling_rate', 1.0, 'samling rate for train file')
 flags.DEFINE_float('test_sampling_rate', 1.0, 'samling rate for test file')
+flags.DEFINE_string('mode', 'all', 'load data all or queue')
+flags.DEFINE_integer('train_queue_capacity', 2000, 'train queue capacity')
+flags.DEFINE_integer('test_queue_capacity', 2000, 'test queue capacity')
 
 
 def debug(msg):
@@ -84,46 +85,130 @@ class Sample:
         
 
 class LoadDataThread(threading.Thread):
-    def __init__(self, tid, files, sampling_rate):
+    def __init__(self, tid, files, sampling_rate, mode='all', sess=None, is_train=True):
         threading.Thread.__init__(self)
         self.samples = []
         self.tid = tid
         self.files = files
         self.sampling_rate = sampling_rate
+        self.mode = mode
+        self.sess = sess
+        self.is_train = is_train
 
     def run(self):
-        for file_name in self.files:
-            info('thread: %d, input file: %s' % (self.tid, file_name))
-            lines_num = 0
-            # TODO(yaowq): rewrite to batch generator mode
-            for line in tf.gfile.GFile(file_name, mode='r'):
-                if line == None or len(line) < 2 or random.random()<1-self.sampling_rate:
-                    continue
-                sample = Sample()
-                sample.parse_line_libsvm(line)
-                self.samples.append(sample)
-                lines_num += 1
-            info("thread: %d, input file: %s, samples: %d" % (self.tid, file_name, lines_num))
-        info("thread: %d, samples: %d" % (self.tid, len(self.samples)))
+        if self.mode == 'all':
+            for file_name in self.files:
+                info('thread: %d, input file: %s' % (self.tid, file_name))
+                lines_num = 0
+                # TODO(yaowq): rewrite to batch generator mode
+                for line in tf.gfile.GFile(file_name, mode='r'):
+                    if line == None or len(line) < 2 or random.random()<1-self.sampling_rate:
+                        continue
+                    sample = Sample()
+                    sample.parse_line_libsvm(line)
+                    self.samples.append(sample)
+                    lines_num += 1
+                info("thread: %d, input file: %s, samples: %d" % (self.tid, file_name, lines_num))
+            info("thread: %d, samples: %d" % (self.tid, len(self.samples)))
+        elif self.mode == 'queue':
+            total_lines_num = 0
+            lines = []
+            while True:
+                for file_name in self.files:
+                    #info('thread: %d, input file: %s' % (self.tid, file_name))
+                    lines_num = 0
+
+                    # TODO(yaowq): rewrite to batch generator mode
+                    for line in tf.gfile.GFile(file_name, mode='r'):
+                        if line == None or len(line) < 2 or random.random()<1-self.sampling_rate:
+                            continue
+                        
+                        if total_lines_num > 0 and total_lines_num % FLAGS.batch_size == 0:
+                            if self.is_train:
+                                self.sess.run(DataProvider.train_enqueue_op, feed_dict={
+                                    DataProvider.train_queue_input: lines
+                                })
+                                '''
+                                self.sess.run(DataProvider.train_data_queue.dequeue())
+                                train_sample = self.sess.run(DataProvider.train_dequeue_op)
+                                train_sample = self.sess.run(DataProvider.train_data_batch)
+                                print("------ len: {}".format(len(train_sample)))
+                                print(np.shape(train_sample))
+                                print(train_sample)
+                                '''
+                            else:
+                                self.sess.run(DataProvider.test_enqueue_op, feed_dict={
+                                    DataProvider.test_queue_input: lines
+                                })
+                                '''
+                                test_sample = self.sess.run(DataProvider.test_data_batch)
+                                print("------ len: {}".format(len(test_sample)))
+                                print(np.shape(test_sample))
+                                print(test_sample)
+                                '''
+                            del lines[:]
+
+                        lines.append([line])
+                        lines_num += 1
+                        total_lines_num += 1
+                    info("thread: %d, input file: %s, samples: %d, total samples: %d" % (self.tid, file_name, lines_num, total_lines_num))
+                    print("train data queue: ", DataProvider.train_data_queue)
+                    print("test data queue: ", DataProvider.test_data_queue)
+                #time.sleep(1)
+            #info("thread: %d, samples: %d" % (self.tid, total_lines_num))
             
 
 class DataProvider:
+    train_data_queue = tf.FIFOQueue(capacity=FLAGS.train_queue_capacity, dtypes=[tf.string], shapes=[[1]])
+    train_queue_input = tf.placeholder(tf.string, shape=[FLAGS.batch_size, 1])
+    train_enqueue_op = train_data_queue.enqueue_many([train_queue_input])
+    train_dequeue_op = train_data_queue.dequeue()
+    train_data_batch = tf.train.batch([train_dequeue_op], batch_size=FLAGS.batch_size, capacity=FLAGS.batch_size)
+
+    test_data_queue = tf.FIFOQueue(capacity=FLAGS.test_queue_capacity, dtypes=[tf.string], shapes=[[1]])
+    test_queue_input = tf.placeholder(tf.string, shape=[FLAGS.batch_size, 1])
+    test_enqueue_op = test_data_queue.enqueue_many([test_queue_input])
+    test_dequeue_op = test_data_queue.dequeue()
+    test_data_batch = tf.train.batch([test_dequeue_op], batch_size=FLAGS.batch_size, capacity=FLAGS.batch_size)
+
+    # queue driver
+    coord = None
+    threads_dequeue = None
+
+    run_options = tf.RunOptions(timeout_in_ms=1000)
+
     def __init__(self, num_workers, task_index, thread_num, mode='all'):
         self.mode = mode
         self.num_workers = num_workers
+        self.task_index = task_index
         self.thread_num = thread_num
 
         self.train_samples = []
         self.test_samples = []
-        '''
-        self.train_file_list = self.GetFileList(FLAGS.train_file_list, num_workers, task_index)
-        self.test_file_list = self.GetFileList(FLAGS.test_file_list, num_workers, task_index)
-        '''
-        self.train_file_list = self.GetFileList(FLAGS.train, num_workers, task_index)
-        self.test_file_list = self.GetFileList(FLAGS.test, num_workers, task_index)
 
-        self.train_threads = self.InitThreads(self.train_file_list, len(self.train_file_list), self.thread_num, FLAGS.train_sampling_rate)
-        self.test_threads = self.InitThreads(self.test_file_list, len(self.test_file_list), self.thread_num, FLAGS.test_sampling_rate)
+        self.train_file_list = []
+        self.test_file_list = []
+
+        self.train_threads = None
+        self.test_threads = None
+
+        self.sess = None
+
+    def init(self, sess=None):
+        self.sess = sess
+
+        self.train_file_list = self.GetFileList(FLAGS.train, self.num_workers, self.task_index)
+        self.test_file_list = self.GetFileList(FLAGS.test, self.num_workers, self.task_index)
+
+        self.train_threads = self.InitThreads(self.train_file_list, len(self.train_file_list)
+            , self.thread_num, FLAGS.train_sampling_rate, sess)
+        self.test_threads = self.InitThreads(self.test_file_list, len(self.test_file_list)
+            , self.thread_num, FLAGS.test_sampling_rate, sess) 
+
+        if self.mode == 'queue':
+            # start data enqueue threads
+            DataProvider.coord = tf.train.Coordinator()
+            DataProvider.threads_dequeue = tf.train.start_queue_runners(coord=DataProvider.coord, sess=sess)
 
     def GetTrainSamples(self):
         return self.train_samples
@@ -132,18 +217,33 @@ class DataProvider:
         return self.test_samples
 
     def GetTestSamplesSampled(self, sampling_rate=1.0, sampling_max_num=1000000):
-        return Sample.format_samples_sparse(np.random.choice(self.test_samples, size=min(sampling_max_num,
-            int(sampling_rate*np.shape(self.test_samples)[0])), replace=False))
+        if self.mode == 'all':
+            return Sample.format_samples_sparse(np.random.choice(self.test_samples, size=min(sampling_max_num,
+                int(sampling_rate*np.shape(self.test_samples)[0])), replace=False))
+        elif self.mode == 'queue':
+            samples = []
+            for i in range(0, int(sampling_max_num/FLAGS.batch_size)):
+                try:
+                    #samples.extend(self.NextBatchQueue(data_type='test'))
+                    # NOTE(yaowq): should be 'test' !!!!!
+                    samples.extend(self.NextBatchQueue(data_type='train'))
+                except Exception,e:
+                    print("ignore exception: ", e)
+                    time.sleep(1)
+            return Sample.format_samples_sparse(samples)
 
-    def InitThreads(self, files, file_num, thread_num, sampling_rate=1.0):
-        return [LoadDataThread(tid, files[tid:file_num:thread_num], sampling_rate) for tid in xrange(0, thread_num)]
+    def InitThreads(self, files, file_num, thread_num, sampling_rate=1.0, sess=None):
+        return [LoadDataThread(tid, files[tid:file_num:thread_num], sampling_rate, self.mode, sess) for tid in xrange(0, thread_num)]
 
     def LoadData(self):
         if self.mode == 'all':
             self.LoadDataAll(self.train_samples, self.train_threads)
             self.LoadDataAll(self.test_samples, self.test_threads)
         elif self.mode == 'queue':
-            self.LoadDataQueue()
+            info("start load train data queue ...")
+            self.LoadDataQueue(self.train_threads)
+            info("start load test data queue ...")
+            self.LoadDataQueue(self.test_threads)
 
     def LoadDataAll(self, samples, threads):
         for t in threads:
@@ -155,44 +255,53 @@ class DataProvider:
             samples.extend(t.samples)
         info("samples: %d" % len(samples))
 
-    def LoadDataQueue(self):
-        pass
+    def LoadDataQueue(self, threads):
+        for t in threads:
+            t.setDaemon(True)
+            t.start()
 
     def Shuffle(self):
         np.random.shuffle(self.train_samples)
 
-    def NextBatch(self, batch_size=100, data_type='train'):
-        if self.mode == 'all': # fetch from full queue
-            #self.NextBatchAll(batch_size, data_type)
-            samples = self.train_samples
-            if data_type != 'train':
-                samples = self.test_samples
+    def NextBatch(self, data_type='train'):
+        if self.mode == 'all': # fetch from all
+            #self.NextBatchAll(data_type)
+            samples = self.train_samples if data_type == 'train' else self.test_samples
             n = np.shape(samples)[0]
-            for s in xrange(0, n, batch_size):
-                e = s+batch_size if s+batch_size<n else n
+            for s in xrange(0, n, FLAGS.batch_size):
+                e = s+FLAGS.batch_size if s+FLAGS.batch_size<n else n
                 yield samples[s:e]
-        elif self.mode == 'queue': # fetch from partial queue
-            self.NextBatchQueue()
+        elif self.mode == 'queue': # fetch from queue
+            #return self.NextBatchQueue()
+            data_batch = DataProvider.train_data_batch if data_type == 'train' else DataProvider.test_data_batch
+            curr_data_batch = self.sess.run(data_batch)
+            samples_batch = []
+            for line in curr_data_batch:
+                sample = Sample()
+                sample.parse_line_libsvm(line)
+                samples_batch.append(sample) 
+            yield samples_batch
+            
 
-    def NextBatchAll(self, batch_size, data_type):
+    def NextBatchAll(self, data_type):
         samples = self.train_samples
         if data_type != 'train':
             samples = self.test_samples
         n = np.shape(samples)[0]
-        for s in xrange(0, n, batch_size):
-            e = s+batch_size if s+batch_size<n else n
+        for s in xrange(0, n, FLAGS.batch_size):
+            e = s+FLAGS.batch_size if s+FLAGS.batch_size<n else n
             yield samples[s:e]
 
-    def NextBatchQueue(self):
-        pass
-
-    '''
-    def GetFileList(self, file_list, num_workers, task_index):
-        train_file_list_gfile = tf.gfile.GFile(file_list, mode="r")
-        lines = train_file_list_gfile.readlines()
-        train_file_list_gfile.close()
-        return [line.strip() for line in lines[task_index:len(lines):num_workers]]
-    '''
+    def NextBatchQueue(self, data_type):
+        data_batch = DataProvider.train_data_batch if data_type == 'train' else DataProvider.test_data_batch
+        curr_data_batch = self.sess.run(data_batch)
+        samples_batch = []
+        for elem in curr_data_batch:
+            line = elem[0]
+            sample = Sample()
+            sample.parse_line_libsvm(line)
+            samples_batch.append(sample) 
+        return samples_batch
 
     def GetFileList(self, input_files, num_workers, task_index):
         file_list = input_files.strip(",").split(",")
@@ -220,24 +329,36 @@ def main(_):
     cluster_conf = json.load(open('cluster_conf.json', "r"))
     cluster_spec = tf.train.ClusterSpec(cluster_conf)
     num_workers = len(cluster_conf['worker'])
+
+    sync_queue_name_template = "shared_queue_{}"
     
     server = tf.train.Server(cluster_spec, job_name=FLAGS.job_name, task_index=FLAGS.task_index)
     
     if FLAGS.job_name == 'ps':
         info('start ...')
         server.join()
+
+        '''
+        sync_queue_name = sync_queue_name_template.format(FLAGS.task_index)
+        queue = tf.FIFOQueue(1, tf.int32, shared_name=sync_queue_name)
+        dequeue_op = queue.dequeue()
+        sess = tf.Session(server.target)
+        info("Waiting for workers done, queue: {}".format(sync_queue_name))
+        for i in range(0, num_workers):
+            sess.run(dequeue_op)
+        info("Terminating parameter server: {}".format(FLAGS.task_index))
+        '''
     
     elif FLAGS.job_name == 'worker':
         info('start ...')
         is_chief = (FLAGS.task_index == 0)
-        data_provider = DataProvider(num_workers, FLAGS.task_index, FLAGS.thread_num, 'all')
-        info('load data')
-        data_provider.LoadData()
 
-        global test_data
-        #test_data = data_provider.GetTestSamplesSampled(sampling_rate=0.1, sampling_max_num=1000000)
-        test_data = data_provider.GetTestSamplesSampled()
-    
+        data_provider = DataProvider(num_workers, FLAGS.task_index, FLAGS.thread_num, FLAGS.mode)
+        if FLAGS.mode == 'all':
+            info('load data')
+            data_provider.init()
+            data_provider.LoadData()
+
         info('build graph')
         with tf.device(tf.train.replica_device_setter(
             worker_device = '/job:worker/task:%d' % FLAGS.task_index
@@ -300,6 +421,39 @@ def main(_):
         #with supervisor.managed_session(server.target) as sess:
         with supervisor.prepare_or_wait_for_session(server.target, config=config) as sess:
             sess.run(init_op)
+
+            if FLAGS.mode == 'queue':
+                info('load data queue ...')
+                data_provider.init(sess)
+                data_provider.LoadData()
+
+            info('sampling test data ...')
+            global test_data
+            test_data = data_provider.GetTestSamplesSampled(sampling_rate=0.1, sampling_max_num=1000)
+            print("--------- shape: ")
+            print(np.shape(test_data))
+            print(test_data)
+            '''
+            while True:
+                try:
+                    #test_data = data_provider.GetTestSamplesSampled()
+                    #test_data = data_provider.NextBatch(data_type='train')
+
+                    #data_batch = DataProvider.train_data_batch
+                    #train_sample = sess.run(data_batch)
+                    train_sample = data_provider.NextBatchQueue(data_type='train')
+                    print("------ len: {}".format(len(train_sample)))
+                    print(np.shape(train_sample))
+                    print(train_sample)
+                except Exception,e:
+                    print("ignore exception: ", e)
+                time.sleep(1)
+            '''
+
+            '''
+            info('get train data batch ...')
+            curr_data_batch = sess.run(DataProvider.train_data_batch, options=DataProvider.run_options)
+            print("current data batch: ", curr_data_batch)
     
             info('Start train ...')
             step_num = 0
@@ -307,7 +461,7 @@ def main(_):
             info('num_epochs: %d' % num_epochs)
             while iter_num < num_epochs:
                 data_provider.Shuffle()
-                for batch_samples in data_provider.NextBatch(batch_size=100, data_type='train'):
+                for batch_samples in data_provider.NextBatch(data_type='train'):
                     if batch_samples == None or len(batch_samples) <= 0:
                         break
                     labels, fids, fvals, sp_indices, batch_size = Sample.format_samples_sparse(batch_samples)
@@ -328,7 +482,7 @@ def main(_):
     
             info('Start evaluate ...')
             auc_val = None
-            for batch_samples in data_provider.NextBatch(batch_size=100, data_type='test'):
+            for batch_samples in data_provider.NextBatch(data_type='test'):
                 if batch_samples == None or len(batch_samples) <= 0:
                     break
                 labels, fids, fvals, sp_indices, batch_size = Sample.format_samples_sparse(batch_samples)
@@ -340,6 +494,18 @@ def main(_):
                     , x_fvals: fvals
                 })
             info('Finish evaluate, auc: {}'.format(auc_val))
+            '''
+        '''
+        # close data queue and session
+        if FLAGS.mode == 'queue':
+            sess.run(DataProvider.train_data_queue.close(cancel_pending_enqueues=True))
+            DataProvider.train_coord.request_stop()
+            DataProvider.train_coord.join(DataProvider.train_threads_dequeue)
+            sess.run(DataProvider.test_data_queue.close(cancel_pending_enqueues=True))
+            DataProvider.test_coord.request_stop()
+            DataProvider.test_coord.join(DataProvider.test_threads_dequeue)
+        sess.close()
+        '''
 
 
 if __name__ == "__main__":
